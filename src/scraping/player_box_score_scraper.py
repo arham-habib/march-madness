@@ -1,3 +1,10 @@
+"""
+DEPRACATED
+Use the Async version in the same folder
+"""
+
+
+
 import os
 import json
 import time

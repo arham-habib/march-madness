@@ -33,7 +33,7 @@ async def fetch_box_score(session: aiohttp.ClientSession, game_id: int) -> Optio
     for attempt in range(retries):
         async with RATE_LIMITER:
             try:
-                async with session.get(url, timeout=3) as response:
+                async with session.get(url, timeout=5) as response:
                     if response.status == 404:
                         logging.warning(f"No game data available for {game_id}.")
                         return None
@@ -43,6 +43,11 @@ async def fetch_box_score(session: aiohttp.ClientSession, game_id: int) -> Optio
                         logging.warning(f"No box score available for game {game_id}.")
                         return None
                     return data
+            except asyncio.TimeoutError:
+                logging.warning(f"Timeout on attempt {attempt + 1} for game {game_id}. Retrying...")
+                await asyncio.sleep(backoff)
+                backoff *= 2
+                continue
             except aiohttp.ClientError as e:
                 logging.warning(f"Attempt {attempt + 1}: Failed to fetch {game_id}: {e}")
                 await asyncio.sleep(backoff)
@@ -95,11 +100,11 @@ async def scrape_box_scores(sport: str, division: str, year: int, game_id: Optio
     game_ids = game_data[game_data["url"] == str(game_id)] if game_id else game_data
 
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_box_score(session, row["url"]) for _, row in game_ids.head(100).iterrows()] #TODO: REMOVE HEAD
+        tasks = [fetch_box_score(session, row["url"]) for _, row in game_ids.iterrows()]
         responses = await tqdm.gather(*tasks)
 
     all_data = []
-    for response, (_, row) in zip(responses, game_ids.head(100).iterrows()):
+    for response, (_, row) in zip(responses, game_ids.iterrows()):
         if response:
             df = await parse_box_scores(response, row["url"], row["date"])
             if not df.empty:
