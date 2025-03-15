@@ -1,0 +1,1 @@
+# TODO: add a simple refresh script for games from 2024 season
