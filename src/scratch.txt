@@ -1,0 +1,43 @@
+                # Matchup Features
+                # (pl.col("ema_points_home") - pl.col("ema_points_away")).alias("points_ema_diff"),
+                # (pl.col("ema_offensive_rating_home") - pl.col("ema_defensive_rating_away")).alias("offensive_rating_ema_diff"),
+                # (pl.col("ema_defensive_rating_home") - pl.col("ema_offensive_rating_away")).alias("defensive_rating_ema_diff"),
+                # (pl.col("ema_2p_pct_home") - pl.col("ema_2p_pct_away")).alias("2_pt_pct_ema_diff"),
+                # (pl.col("ema_3p_pct_home") - pl.col("ema_3p_pct_away")).alias("3_pt_pct_ema_diff"),
+                # (pl.col("ema_ft_pct_home") - pl.col("ema_ft_pct_away")).alias("ft_pct_ema_diff"),
+                # (pl.col("ema_off_rebound_rate_home") - pl.col("ema_def_rebound_rate_away")).alias("off_rebound_rate_ema_diff"),
+                # (pl.col("ema_def_rebound_rate_home") - pl.col("ema_off_rebound_rate_away")).alias("def_rebound_rate_ema_diff"),
+                # (pl.col("ema_turnover_rate_away") - pl.col("ema_turnover_rate_home")).alias("turnover_rate_ema_diff"),
+                # (pl.col("ema_assist_turnover_home") - pl.col("ema_assist_turnover_away")).alias("assist_turnover_ema_diff"),
+                # (pl.col("ema_block_rate_home") - pl.col("ema_block_rate_away")).alias("block_rate_ema_diff"),
+
+
+    def _update_elo(self, elo_a: float, elo_b: float, score_a: float, score_b: float) -> tuple:
+        """Update ELO ratings based on game result using 538's formula."""
+        # Calculate margin of victory and elo difference
+        mov = abs(score_a - score_b)
+        elo_diff = elo_a - elo_b if score_a > score_b else elo_b - elo_a
+        
+        # Apply 538's MOV multiplier formula
+        mov_multiplier = ((mov + 3) ** 0.8) / (7.5 + 0.006 * elo_diff)
+
+        # Calculate expected results
+        expected_a = self._expected_result(elo_a, elo_b)
+        result_a = 1 if score_a > score_b else 0  # Win = 1, Loss = 0
+        
+        # Update Elos using MOV multiplier
+        k_mov = self.k_factor * mov_multiplier
+        new_elo_a = elo_a + k_mov * (result_a - expected_a)
+        new_elo_b = elo_b + k_mov * ((1 - result_a) - (1 - expected_a))
+        
+        return new_elo_a, new_elo_b
+
+
+
+    def _update_elo(self, elo_a: float, elo_b: float, score_a: float, score_b: float) -> tuple:
+        """Update ELO ratings based on game result."""
+        expected_a = self._expected_result(elo_a, elo_b)
+        result_a = 1 if score_a > score_b else 0  # Win = 1, Loss = 0
+        new_elo_a = elo_a + self.k_factor * (result_a - expected_a)
+        new_elo_b = elo_b + self.k_factor * ((1 - result_a) - (1 - expected_a))
+        return new_elo_a, new_elo_b

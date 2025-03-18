@@ -1,5 +1,12 @@
 import polars as pl
+import numpy as np
 
+"""
+TODO
+- Shuffle the data randomly between home and away
+- Shrink the data
+
+"""
 class MarchMadnessFeaturePipeline():
 
     def __init__(self, player_stats_df: pl.DataFrame, games_df: pl.DataFrame, 
@@ -36,18 +43,28 @@ class MarchMadnessFeaturePipeline():
             subset=["player", "team", "gameID"]
         )
 
-
     def _expected_result(self, rating_a: float, rating_b: float) -> float:
         """Calculate expected score for team A based on ELO ratings."""
         return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
 
 
     def _update_elo(self, elo_a: float, elo_b: float, score_a: float, score_b: float) -> tuple:
-        """Update ELO ratings based on game result."""
+        """Update ELO ratings based on game result using 538's formula."""
+        # Calculate margin of victory
+        mov = score_a - score_b if score_a > score_b else score_b - score_a
+        
+        # Calculate expected results
         expected_a = self._expected_result(elo_a, elo_b)
         result_a = 1 if score_a > score_b else 0  # Win = 1, Loss = 0
-        new_elo_a = elo_a + self.k_factor * (result_a - expected_a)
-        new_elo_b = elo_b + self.k_factor * ((1 - result_a) - (1 - expected_a))
+        
+        # Apply 538's MOV multiplier formula
+        mov_multiplier = ((mov + 3) ** 0.8) / (7.5 + 0.006 * (elo_a - elo_b))
+        
+        # Update Elos using MOV multiplier
+        k_mov = self.k_factor * mov_multiplier
+        new_elo_a = elo_a + k_mov * (result_a - expected_a)
+        new_elo_b = elo_b + k_mov * ((1 - result_a) - (1 - expected_a))
+        
         return new_elo_a, new_elo_b
 
 
@@ -82,25 +99,24 @@ class MarchMadnessFeaturePipeline():
             # Store game result with ELOs
             game_rows.append({
                 **row,
-                "home_elo": new_home_elo,
-                "away_elo": new_away_elo,
-                "home_lagged_elo": home_lagged_elo,
-                "away_lagged_elo": away_lagged_elo,
-                "home_elo_change": home_elo_change,
-                "away_elo_change": away_elo_change
+                "elo_home": new_home_elo,
+                "elo_away": new_away_elo,
+                "lagged_elo_home": home_lagged_elo,
+                "lagged_elo_away": away_lagged_elo,
+                "elo_change_home": home_elo_change,
+                "elo_change_away": away_elo_change
             })
         elo_df = pl.DataFrame(game_rows)
         elo_df = elo_df.with_columns([
-            pl.col("home_elo_change").shift(1).alias("home_lagged_elo_change"),
-            pl.col("away_elo_change").shift(1).alias("away_lagged_elo_change"),
-            (pl.col("home_elo") - pl.col("away_elo")).alias("elo_difference"),
-            (pl.col("home_elo") - pl.col("away_elo")).shift(1).alias("elo_difference_lagged"),
-            pl.col("home_elo_change").shift(1).ewm_mean(alpha=self.ema_alpha).alias("home_elo_change_ema"),
-            pl.col("away_elo_change").shift(1).ewm_mean(alpha=self.ema_alpha).alias("away_elo_change_ema")
+            pl.col("elo_change_home").shift(1).alias("lagged_elo_change_home"),
+            pl.col("elo_change_away").shift(1).alias("lagged_elo_change_away"),
+            # (pl.col("home_elo") - pl.col("away_elo")).alias("elo_difference"),
+            # (pl.col("home_elo") - pl.col("away_elo")).shift(1).alias("elo_difference_lagged"),
+            pl.col("elo_change_home").shift(1).ewm_mean(alpha=self.ema_alpha).alias("elo_change_ema_home"),
+            pl.col("elo_change_away").shift(1).ewm_mean(alpha=self.ema_alpha).alias("elo_change_ema_away")
         ])
 
         self.games_df = elo_df
-
 
     def aggregate_team_stats(self) -> pl.DataFrame:
         """Aggregate player-level stats into team-level stats per game"""
@@ -129,7 +145,6 @@ class MarchMadnessFeaturePipeline():
                 pl.sum("personalFouls").alias("fouls")
             ])
         )
-    
 
     def merge_opponent_stats(self, df: pl.DataFrame) -> pl.DataFrame:
         """Merges opponent team stats to compute rebound rate, block rate, and offensive/defensive ratings."""
@@ -205,7 +220,6 @@ class MarchMadnessFeaturePipeline():
                 pl.col("defensive_rating").shift(1).ewm_mean(self.ema_alpha, min_periods=10).over("team").alias("ema_defensive_rating")
             ])
         )
-    
 
     def merge_with_matchups(self, df: pl.DataFrame) -> pl.DataFrame:
         """Merges EMA features with the game matchups."""
@@ -222,32 +236,140 @@ class MarchMadnessFeaturePipeline():
                 "gameID", "date", "home_team", "away_team", "home_score", "away_score", "conference_home", "conference_away",
 
                 # ELO features
-                "home_elo", "home_elo_change", "home_lagged_elo", "home_lagged_elo_change", "home_elo_change_ema", 
-                "away_elo", "away_elo_change", "away_lagged_elo", "away_lagged_elo_change", "away_elo_change_ema",
-                "elo_difference_lagged",
+                "elo_home", "elo_change_home", "lagged_elo_home", "lagged_elo_change_home", "elo_change_ema_home", 
+                "elo_away", "elo_change_away", "lagged_elo_away", "lagged_elo_change_away", "elo_change_ema_away",
                 
                 # EMA Features for Home Team
-                "ema_points_home", "ema_2p_pct_home", "ema_3p_pct_home", "ema_ft_pct_home", 
+                "ema_points_home", "ema_2p_pct_home", "ema_3p_pct_home", "ema_ft_pct_home", "ema_offensive_rating_home", "ema_defensive_rating_home",
                 "ema_off_rebound_rate_home", "ema_def_rebound_rate_home", "ema_turnover_rate_home", "ema_assist_turnover_home", "ema_block_rate_home",
 
                 # EMA Features for Away Team
-                "ema_points_away", "ema_2p_pct_away", "ema_3p_pct_away", "ema_ft_pct_away", 
+                "ema_points_away", "ema_2p_pct_away", "ema_3p_pct_away", "ema_ft_pct_away", "ema_offensive_rating_away", "ema_defensive_rating_away",
                 "ema_off_rebound_rate_away", "ema_def_rebound_rate_away", "ema_turnover_rate_away", "ema_assist_turnover_away", "ema_block_rate_away",
-
-                # Matchup Features
-                (pl.col("ema_points_home") - pl.col("ema_points_away")).alias("points_ema_diff"),
-                (pl.col("ema_offensive_rating_home") - pl.col("ema_defensive_rating_away")).alias("offensive_rating_ema_diff"),
-                (pl.col("ema_defensive_rating_home") - pl.col("ema_offensive_rating_away")).alias("defensive_rating_ema_diff"),
-                (pl.col("ema_2p_pct_home") - pl.col("ema_2p_pct_away")).alias("2_pt_pct_ema_diff"),
-                (pl.col("ema_3p_pct_home") - pl.col("ema_3p_pct_away")).alias("3_pt_pct_ema_diff"),
-                (pl.col("ema_ft_pct_home") - pl.col("ema_ft_pct_away")).alias("ft_pct_ema_diff"),
-                (pl.col("ema_off_rebound_rate_home") - pl.col("ema_def_rebound_rate_away")).alias("off_rebound_rate_ema_diff"),
-                (pl.col("ema_def_rebound_rate_home") - pl.col("ema_off_rebound_rate_away")).alias("def_rebound_rate_ema_diff"),
-                (pl.col("ema_turnover_rate_away") - pl.col("ema_turnover_rate_home")).alias("turnover_rate_ema_diff"),
-                (pl.col("ema_assist_turnover_home") - pl.col("ema_assist_turnover_away")).alias("assist_turnover_ema_diff"),
-                (pl.col("ema_block_rate_home") - pl.col("ema_block_rate_away")).alias("block_rate_ema_diff"),
+                # results
+                (pl.col("home_score") > pl.col("away_score")).alias("home_win"),
             ])
         )
+    
+    def unpack_features(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Unpack the home/away into just the statistics for every team"""
+        # Create home team records
+        home_records = df.select([
+            pl.col("gameID"),
+            pl.col("date"),
+            pl.col("home_team").alias("team"),
+            pl.col("elo_home").alias("elo"),
+            pl.col("elo_change_home").alias("elo_change"),
+            pl.col("lagged_elo_home").alias("lagged_elo"),
+            pl.col("lagged_elo_change_home").alias("lagged_elo_change"),
+            pl.col("elo_change_ema_home").alias("elo_change_ema"),
+            pl.col("ema_points_home").alias("ema_points"),
+            pl.col("ema_2p_pct_home").alias("ema_2p_pct"),
+            pl.col("ema_3p_pct_home").alias("ema_3p_pct"),
+            pl.col("ema_ft_pct_home").alias("ema_ft_pct"),
+            pl.col("ema_off_rebound_rate_home").alias("ema_off_rebound_rate"),
+            pl.col("ema_def_rebound_rate_home").alias("ema_def_rebound_rate"),
+            pl.col("ema_turnover_rate_home").alias("ema_turnover_rate"),
+            pl.col("ema_assist_turnover_home").alias("ema_assist_turnover"),
+            pl.col("ema_block_rate_home").alias("ema_block_rate"),
+            pl.col("ema_offensive_rating_home").alias("ema_offensive_rating"),
+            pl.col("ema_defensive_rating_home").alias("ema_defensive_rating")
+        ])
+
+        # Create away team records 
+        away_records = df.select([
+            pl.col("gameID"),
+            pl.col("date"),
+            pl.col("away_team").alias("team"),
+            pl.col("elo_away").alias("elo"),
+            pl.col("elo_change_away").alias("elo_change"),
+            pl.col("lagged_elo_away").alias("lagged_elo"),
+            pl.col("lagged_elo_change_away").alias("lagged_elo_change"),
+            pl.col("elo_change_ema_away").alias("elo_change_ema"),
+            pl.col("ema_points_away").alias("ema_points"),
+            pl.col("ema_2p_pct_away").alias("ema_2p_pct"),
+            pl.col("ema_3p_pct_away").alias("ema_3p_pct"),
+            pl.col("ema_ft_pct_away").alias("ema_ft_pct"),
+            pl.col("ema_off_rebound_rate_away").alias("ema_off_rebound_rate"),
+            pl.col("ema_def_rebound_rate_away").alias("ema_def_rebound_rate"),
+            pl.col("ema_turnover_rate_away").alias("ema_turnover_rate"),
+            pl.col("ema_assist_turnover_away").alias("ema_assist_turnover"),
+            pl.col("ema_block_rate_away").alias("ema_block_rate"),
+            pl.col("ema_offensive_rating_away").alias("ema_offensive_rating"),
+            pl.col("ema_defensive_rating_away").alias("ema_defensive_rating")
+        ])
+
+        # Combine and sort records
+        return pl.concat([home_records, away_records]).sort(["date", "gameID", "team"])
+
+    def randomize_home_away(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Randomly shuffles home/away teams and inverts diff metrics to remove home/away bias."""
+    
+        # Create copy of dataframe
+        df = df.clone()
+        # Add random swap column
+        # Set random seed for reproducibility
+        np.random.seed(42)
+        # Create boolean mask that will be True for exactly 50% of rows
+        n_rows = df.height
+        n_swaps = n_rows // 2
+        swap_mask = np.zeros(n_rows, dtype=bool)
+        swap_mask[:n_swaps] = True
+        np.random.shuffle(swap_mask)
+        df = df.with_columns(pl.lit(swap_mask).alias("swap"))
+        
+        # Conditionally swap columns based on swap flag
+        df_swapped = df.with_columns([
+            # Swap teams and scores
+            pl.when(pl.col("swap")).then(pl.col("away_team")).otherwise(pl.col("home_team")).alias("home_team"),
+            pl.when(pl.col("swap")).then(pl.col("home_team")).otherwise(pl.col("away_team")).alias("away_team"),
+            pl.when(pl.col("swap")).then(pl.col("away_score")).otherwise(pl.col("home_score")).alias("home_score"),
+            pl.when(pl.col("swap")).then(pl.col("home_score")).otherwise(pl.col("away_score")).alias("away_score"),
+            pl.when(pl.col("swap")).then(pl.col("conference_away")).otherwise(pl.col("conference_home")).alias("conference_home"),
+            pl.when(pl.col("swap")).then(pl.col("conference_home")).otherwise(pl.col("conference_away")).alias("conference_away"),
+            
+            # Swap ELO features
+            pl.when(pl.col("swap")).then(pl.col("elo_away")).otherwise(pl.col("elo_home")).alias("elo_home"),
+            pl.when(pl.col("swap")).then(pl.col("elo_change_away")).otherwise(pl.col("elo_change_home")).alias("elo_change_home"),
+            pl.when(pl.col("swap")).then(pl.col("lagged_elo_away")).otherwise(pl.col("lagged_elo_home")).alias("lagged_elo_home"),
+            pl.when(pl.col("swap")).then(pl.col("lagged_elo_change_away")).otherwise(pl.col("lagged_elo_change_home")).alias("lagged_elo_change_home"),
+            pl.when(pl.col("swap")).then(pl.col("elo_change_ema_away")).otherwise(pl.col("elo_change_ema_home")).alias("elo_change_ema_home"),
+            pl.when(pl.col("swap")).then(pl.col("elo_home")).otherwise(pl.col("elo_away")).alias("elo_away"),
+            pl.when(pl.col("swap")).then(pl.col("elo_change_home")).otherwise(pl.col("elo_change_away")).alias("elo_change_away"),
+            pl.when(pl.col("swap")).then(pl.col("lagged_elo_home")).otherwise(pl.col("lagged_elo_away")).alias("lagged_elo_away"),
+            pl.when(pl.col("swap")).then(pl.col("lagged_elo_change_home")).otherwise(pl.col("lagged_elo_change_away")).alias("lagged_elo_change_away"),
+            pl.when(pl.col("swap")).then(pl.col("elo_change_ema_home")).otherwise(pl.col("elo_change_ema_away")).alias("elo_change_ema_away"),
+
+            # Swap EMA features for home/away teams
+            pl.when(pl.col("swap")).then(pl.col("ema_points_away")).otherwise(pl.col("ema_points_home")).alias("ema_points_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_2p_pct_away")).otherwise(pl.col("ema_2p_pct_home")).alias("ema_2p_pct_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_3p_pct_away")).otherwise(pl.col("ema_3p_pct_home")).alias("ema_3p_pct_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_ft_pct_away")).otherwise(pl.col("ema_ft_pct_home")).alias("ema_ft_pct_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_off_rebound_rate_away")).otherwise(pl.col("ema_off_rebound_rate_home")).alias("ema_off_rebound_rate_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_def_rebound_rate_away")).otherwise(pl.col("ema_def_rebound_rate_home")).alias("ema_def_rebound_rate_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_turnover_rate_away")).otherwise(pl.col("ema_turnover_rate_home")).alias("ema_turnover_rate_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_assist_turnover_away")).otherwise(pl.col("ema_assist_turnover_home")).alias("ema_assist_turnover_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_block_rate_away")).otherwise(pl.col("ema_block_rate_home")).alias("ema_block_rate_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_offensive_rating_away")).otherwise(pl.col("ema_offensive_rating_home")).alias("ema_offensive_rating_home"),
+            pl.when(pl.col("swap")).then(pl.col("ema_defensive_rating_away")).otherwise(pl.col("ema_defensive_rating_home")).alias("ema_defensive_rating_home"),
+
+
+            pl.when(pl.col("swap")).then(pl.col("ema_points_home")).otherwise(pl.col("ema_points_away")).alias("ema_points_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_2p_pct_home")).otherwise(pl.col("ema_2p_pct_away")).alias("ema_2p_pct_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_3p_pct_home")).otherwise(pl.col("ema_3p_pct_away")).alias("ema_3p_pct_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_ft_pct_home")).otherwise(pl.col("ema_ft_pct_away")).alias("ema_ft_pct_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_off_rebound_rate_home")).otherwise(pl.col("ema_off_rebound_rate_away")).alias("ema_off_rebound_rate_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_def_rebound_rate_home")).otherwise(pl.col("ema_def_rebound_rate_away")).alias("ema_def_rebound_rate_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_turnover_rate_home")).otherwise(pl.col("ema_turnover_rate_away")).alias("ema_turnover_rate_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_assist_turnover_home")).otherwise(pl.col("ema_assist_turnover_away")).alias("ema_assist_turnover_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_block_rate_home")).otherwise(pl.col("ema_block_rate_away")).alias("ema_block_rate_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_defensive_rating_home")).otherwise(pl.col("ema_defensive_rating_away")).alias("ema_defensive_rating_away"),
+            pl.when(pl.col("swap")).then(pl.col("ema_offensive_rating_home")).otherwise(pl.col("ema_offensive_rating_away")).alias("ema_offensive_rating_away"),
+
+            pl.when(pl.col("swap")).then(~pl.col("home_win")).otherwise(pl.col("home_win")).alias("home_win")
+        ])
+        # Drop the swap column
+        return df_swapped.drop("swap")
 
 
     def build_features(self) -> pl.DataFrame:
@@ -284,4 +406,14 @@ class MarchMadnessFeaturePipeline():
         print("Ema shape", ema_features.shape)
         print("=========================================================")
 
-        return self.merge_with_matchups(ema_features)
+        merged_data = self.merge_with_matchups(ema_features)
+        merged_data_randomized = self.randomize_home_away(merged_data)
+        merged_data_unpacked = self.unpack_features(merged_data_randomized)
+
+        print("=========================================================")
+        print("Merged features: ", merged_data.columns)
+        # print("Ema dtypes:", ema_features.dtypes)
+        print("Merged shape", merged_data.shape)
+        print("=========================================================")
+
+        return merged_data_randomized, merged_data_unpacked
