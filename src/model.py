@@ -24,57 +24,37 @@ import statsmodels.api as sm
 
 class BaseModel:
 
-    RAW_FEATURES = [
-            "ema_points",
-            "ema_offensive_rating",
-            "ema_defensive_rating",
-            "ema_2p_pct",
-            "ema_3p_pct",
-            "ema_ft_pct",
-            "ema_off_rebound_rate",
-            "ema_def_rebound_rate",
-            "ema_turnover_rate",
-            "ema_assist_turnover",
-            "ema_block_rate",
-            "lagged_elo",
-            "lagged_elo_change", 
-            "elo_change_ema"
-        ]
-
-    def __init__(self, data, unpacked_data, features, target, date_column, random_state=42):
+    def __init__(self, data, unpacked_data, validation_data, features, target, random_state=42):
         """
         Initialize the base model with data and parameters.
 
         Parameters:
             data (pd.DataFrame): The full dataset.
+            unpacked_data (pd.DataFrame): The dataset unpacked to a non-versus format
+            validation_data (pd.DataFrame): the dataset to validate on
             features (list): List of feature column names.
             target (str): Target column name.
-            date_column (str): Column name with datetime information.
             random_state (int): Random seed for reproducibility.
         """
         self.data = data.copy()
         self.unpacked_data = unpacked_data
+        self.validation_data = validation_data
         self.features = features
         self.target = target
-        self.date_column = date_column
         self.random_state = random_state
         self.model = None
         self.split_data()
 
     def split_data(self):
         """
-        Split data into train, test, and validation sets based on date.
+        Split data into train, test, and validation sets
         Train and test are before March 10th of the last year (80/20 split),
         validation is on or after March 10th.
         """
-        self.data[self.date_column] = pd.to_datetime(self.data[self.date_column])
-        max_date = self.data[self.date_column].max()
-        last_year = max_date.year
-        cutoff = pd.Timestamp(year=last_year, month=3, day=10)
-        self.compute_last_observable_features(cutoff)
+        self.compute_last_observable_features()
 
-        game_cols = ['date', 'home_team', 'away_team', 'home_score', 'away_score']
-        validation_data = self.data[self.data[self.date_column] >= cutoff].loc[:, game_cols].copy()
+        game_cols = ['Season', 'DayNum', 'home_team', 'away_team', 'home_score', 'away_score']
+        validation_data = self.validation_data.loc[:, game_cols].copy()
 
         home_features = self.last_observable_features.add_suffix('_home')
         away_features = self.last_observable_features.add_suffix('_away')
@@ -86,7 +66,7 @@ class BaseModel:
         )
 
         validation_data.drop(columns=['team_home', 'team_away'], inplace=True)
-        pre_cutoff_data = self.data[self.data[self.date_column] < cutoff]
+        pre_cutoff_data = self.data
         
         # Randomly split pre-cutoff data into train and test sets
         train_size = 0.8 # TODO MAKE HYPERPARAM
@@ -95,11 +75,13 @@ class BaseModel:
         self.train_data = self.add_matchup_features(pre_cutoff_data[train_indices].copy())
         self.test_data = self.add_matchup_features(pre_cutoff_data[~train_indices].copy())
         self.validation_data = self.add_matchup_features(validation_data)
+        
+        # Set exponential weights with half-life of 6000 games
+        decay_rate = np.log(2) / 6000  # Calculate decay rate from half-life
+        time_points = np.arange(len(self.train_data))
+        self.weights = np.exp(-decay_rate * time_points)
 
         self.drop_nans()
-
-    def boost_validation_data(self):
-        """Boost the validation data's ELOs"""
 
     def drop_nans(self):
         """Drop rows with NaN values in feature columns for all datasets."""
@@ -107,7 +89,7 @@ class BaseModel:
         self.test_data = self.test_data.dropna(subset=self.features) 
         self.validation_data = self.validation_data.dropna(subset=self.features)
 
-    def compute_last_observable_features(self, cutoff):
+    def compute_last_observable_features(self):
         """
         Compute and store the last observable features for each team from self.data
         prior to the cutoff date. This method stacks the home and away records,
@@ -120,8 +102,8 @@ class BaseModel:
             pd.DataFrame: A dataframe containing the last observable features for each team.
         """
         pre_cutoff_data = (
-            self.unpacked_data[self.unpacked_data[self.date_column] < cutoff]
-            .sort_values(self.date_column)
+            self.unpacked_data # [self.unpacked_data[self.date_column] < cutoff]
+            .sort_values(['Season', 'DayNum'])
             .groupby('team')
             .last()
             .reset_index()
@@ -224,7 +206,7 @@ class BaseModel:
         for ax, dataset, title in zip(
             axes, [self.train_data, self.test_data, self.validation_data], ["Train", "Test", "Validation"]
         ):
-            df = dataset.sort_values(by=self.date_column)
+            df = dataset.sort_values(by=["Season", "DayNum"])
             X = df[self.features]
             y = df[self.target]
             preds = self.predict_proba(X)
@@ -232,8 +214,8 @@ class BaseModel:
                 log_loss(y.iloc[i - window_size:i], preds[i - window_size:i], labels=[0, 1])
                 for i in range(window_size, len(df))
             ]
-            dates = df[self.date_column].iloc[window_size:].values
-            ax.plot(dates, rolling_losses)
+            indices = np.arange(len(rolling_losses))
+            ax.plot(indices, rolling_losses)
             ax.set_title(f"{title} Rolling Log Loss")
             ax.set_xlabel("Date")
             ax.set_ylabel("Log Loss")
@@ -280,7 +262,7 @@ class BaseModel:
 
 
 class XGBoostModel(BaseModel):
-    def __init__(self, data, unpacked_data, features, target, date_column, optuna_n_trials=50, random_state=42):
+    def __init__(self, data, unpacked_data, validation_data, features, target, optuna_n_trials=50, random_state=42):
         """
         Initialize the XGBoost model.
 
@@ -289,11 +271,10 @@ class XGBoostModel(BaseModel):
             unpacked_data (pd.DataFrame)
             features (list): List of feature column names.
             target (str): Target column name.
-            date_column (str): Column name with datetime information.
             optuna_n_trials (int): Number of Optuna trials for tuning.
             random_state (int): Random seed for reproducibility.
         """
-        super().__init__(data, unpacked_data, features, target, date_column, random_state)
+        super().__init__(data, unpacked_data, validation_data, features, target, random_state)
         self.optuna_n_trials = optuna_n_trials
         self.best_params = None
         # Preprocess data to ensure correct types at initialization
@@ -327,7 +308,7 @@ class XGBoostModel(BaseModel):
         # Ensure data types before fitting
         X_train = self.train_data[self.features].astype(np.float64)
         y_train = self.train_data[self.target].astype(np.float64)
-        model.fit(X_train, y_train)
+        model.fit( X_train, y_train)
         X_test = self.test_data[self.features].astype(np.float64)
         y_test = self.test_data[self.target].astype(np.float64)
         preds = model.predict_proba(X_test)[:, 1].astype(np.float64)  # Ensure predictions are float64
@@ -450,3 +431,4 @@ class LogisticRegressionModel(BaseModel):
         ax.set_title("Feature Importance (Coefficients)")
         plt.tight_layout()
         return fig, ax  # Return fig and ax instead of plt.show()
+    

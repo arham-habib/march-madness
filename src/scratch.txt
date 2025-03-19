@@ -41,3 +41,17 @@
         new_elo_a = elo_a + self.k_factor * (result_a - expected_a)
         new_elo_b = elo_b + self.k_factor * ((1 - result_a) - (1 - expected_a))
         return new_elo_a, new_elo_b
+
+
+
+    # def boost_validation_data(self):
+    #     """Boost the validation data's ELOs"""
+    #     MARCH_MADNESS_WINNER_ELO = 2000
+    #     self.validation_data = (
+    #         self.validation_data.assign(
+    #             year=lambda x: x['date'].dt.year,
+    #             days_from_april_10=lambda x: (x['date'] - pd.Timestamp(year=x['date'].dt.year.iloc[0], month=4, day=10)).dt.days,
+    #             elo_boost_home=lambda x: (MARCH_MADNESS_WINNER_ELO - x['lagged_elo_home']) * x['days_from_april_10'] / 20,
+    #             elo_boost_away=lambda x: (MARCH_MADNESS_WINNER_ELO - x['lagged_elo_away']) * x['days_from_april_10'] / 20
+    #         )
+    #     )
